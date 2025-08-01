@@ -316,8 +316,7 @@ where
                 } else {
                     let range_err =
                         self.read_16bit(Register::RESULT_RANGE_STATUS_plus_10);
-                    let write_err = self
-                        .write_register(Register::SYSTEM_INTERRUPT_CLEAR, 0x01);
+                    let write_err = self.clear_interrupt_status();
                     match (range_err, write_err) {
                         (Ok(res), Ok(_)) => Ok(res),
                         (Err(e), _) => Err(nb::Error::Other(Error::from(e))),
@@ -344,7 +343,7 @@ where
         }
         let range_err = self.read_16bit(Register::RESULT_RANGE_STATUS_plus_10);
         // don't use ? to cleanup
-        self.write_register(Register::SYSTEM_INTERRUPT_CLEAR, 0x01)?;
+        self.clear_interrupt_status()?;
 
         Ok(range_err?)
     }
@@ -391,7 +390,7 @@ where
                 return Err(Error::Timeout);
             }
         }
-        self.write_register(Register::SYSTEM_INTERRUPT_CLEAR, 0x01)?;
+        self.clear_interrupt_status()?;
         self.write_register(Register::SYSRANGE_START, 0x00)?;
 
         Ok(())
@@ -577,15 +576,9 @@ where
         // -- VL53L0X_load_tuning_settings() end
 
         // "Set interrupt config to new sample ready"
-        // -- VL53L0X_SetGpioConfig() begin
 
-        self.write_register(Register::SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04)?;
-        // active low
-        let high = self.read_register(Register::GPIO_HV_MUX_ACTIVE_HIGH)?;
-        self.write_register(Register::GPIO_HV_MUX_ACTIVE_HIGH, high & !0x10)?;
-        self.write_register(Register::SYSTEM_INTERRUPT_CLEAR, 0x01)?;
+        self.set_gpio_config(GpioFunctionality::NewSampleReady, GpioPolarity::ActiveLow)?;
 
-        // -- VL53L0X_SetGpioConfig() end
         // "Disable MSRC and TCC by default"
         // MSRC = Minimum Signal Rate Check
         // TCC = Target CentreCheck
@@ -754,8 +747,7 @@ where
         let enables = self.get_sequence_step_enables()?;
         let timeouts = self.get_sequence_step_timeouts(&enables)?;
 
-        let mut use_budget_microseconds: u32 =
-            start_overhead + end_overhead;
+        let mut use_budget_microseconds: u32 = start_overhead + end_overhead;
         if enables.tcc {
             use_budget_microseconds +=
                 timeouts.msrc_dss_tcc_microseconds + tcc_overhead;
@@ -845,8 +837,8 @@ where
         }
 
         // Encode: divide by 2 because firmware multiplies by 2 during comparison
-        let low_raw = (low_mm / 2) & 0x0FFF;
-        let high_raw = (high_mm / 2) & 0x0FFF;
+        let low_raw = (low_mm >> 1) & 0x0FFF;
+        let high_raw = (high_mm >> 1) & 0x0FFF;
 
         // Write to registers
         self.write_16bit(Register::SYSTEM_THRESH_LOW, low_raw)?;
@@ -865,10 +857,76 @@ where
         let high_raw = self.read_16bit(Register::SYSTEM_THRESH_HIGH)?;
 
         // Decode: multiply by 2 to get actual mm values
-        let low_mm = (low_raw & 0x0FFF) * 2;
-        let high_mm = (high_raw & 0x0FFF) * 2;
+        let low_mm = (low_raw & 0x0FFF) << 1;
+        let high_mm = (high_raw & 0x0FFF) << 1;
 
         Ok((low_mm, high_mm))
+    }
+
+    /// Configure the sensor's interrupt GPIO at runtime.
+    ///
+    /// Changes which event triggers the interrupt and the active polarity.
+    /// Clears any pending interrupt after configuration.
+    ///
+    /// # Example
+    /// ```
+    /// # use vl53l0x::{VL53L0x, GpioFunctionality, GpioPolarity, Error};
+    /// # fn test() -> Result<(), Error<()>> {
+    /// # let i2c = unimplemented!(); // dummy_i2c();
+    /// # let mut tof = VL53L0x::new(i2c)?;
+    /// // Trigger interrupt when data is ready, active-low
+    /// tof.set_gpio_config(
+    ///     GpioFunctionality::NewSampleReady,
+    ///     GpioPolarity::ActiveLow
+    /// )?;
+    ///
+    /// // Or trigger when range goes outside thresholds, active-high
+    /// tof.set_gpio_config(
+    ///     GpioFunctionality::OutOfWindow,
+    ///     GpioPolarity::ActiveHigh
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_gpio_config(
+        &mut self,
+        func: GpioFunctionality,
+        polarity: GpioPolarity,
+    ) -> Result<(), Error<E>> {
+        // Map functionality to register value
+        let func_val = match func {
+            GpioFunctionality::NewSampleReady => 0x04,
+            GpioFunctionality::LevelLow => 0x01,
+            GpioFunctionality::LevelHigh => 0x02,
+            GpioFunctionality::OutOfWindow => 0x03,
+        };
+
+        // Write functionality configuration
+        self.write_register(Register::SYSTEM_INTERRUPT_CONFIG_GPIO, func_val)?;
+
+        // Configure polarity by modifying bit 4 of GPIO_HV_MUX_ACTIVE_HIGH
+        let mut high_reg =
+            self.read_register(Register::GPIO_HV_MUX_ACTIVE_HIGH)?;
+        match polarity {
+            GpioPolarity::ActiveLow => {
+                high_reg &= !0x10; // Clear bit 4
+            }
+            GpioPolarity::ActiveHigh => {
+                high_reg |= 0x10; // Set bit 4
+            }
+        }
+        self.write_register(Register::GPIO_HV_MUX_ACTIVE_HIGH, high_reg)?;
+
+        // Clear any pending interrupt
+        self.clear_interrupt_status()?;
+
+        Ok(())
+    }
+
+    /// Clear the interrupt status.
+    pub fn clear_interrupt_status(&mut self) -> Result<(), E> {
+        self.write_register(Register::SYSTEM_INTERRUPT_CLEAR, 0x01)?;
+        self.write_register(Register::SYSTEM_INTERRUPT_CLEAR, 0x00)
     }
 
     /*
@@ -921,8 +979,7 @@ struct SeqStepTimeouts {
 
 fn decode_timeout(register_value: u16) -> u16 {
     // format: "(LSByte * 2^MSByte) + 1"
-    ((register_value & 0x00FF) << ((register_value & 0xFF00) >> 8))
-        + 1
+    ((register_value & 0x00FF) << ((register_value & 0xFF00) >> 8)) + 1
 }
 
 fn encode_timeout(timeout_mclks: u16) -> u16 {
@@ -950,8 +1007,7 @@ fn timeout_mclks_to_microseconds(
     timeout_period_mclks: u16,
     vcsel_period_pclks: u8,
 ) -> u32 {
-    let macro_period_nanoseconds: u32 =
-        calc_macro_period(vcsel_period_pclks);
+    let macro_period_nanoseconds: u32 = calc_macro_period(vcsel_period_pclks);
     (((timeout_period_mclks as u32) * macro_period_nanoseconds)
         + (macro_period_nanoseconds / 2))
         / 1000
@@ -961,8 +1017,7 @@ fn timeout_microseconds_to_mclks(
     timeout_period_microseconds: u32,
     vcsel_period_pclks: u8,
 ) -> u32 {
-    let macro_period_nanoseconds: u32 =
-        calc_macro_period(vcsel_period_pclks);
+    let macro_period_nanoseconds: u32 = calc_macro_period(vcsel_period_pclks);
 
     ((timeout_period_microseconds * 1000) + (macro_period_nanoseconds / 2))
         / macro_period_nanoseconds
@@ -1015,4 +1070,26 @@ enum Register {
 enum VcselPeriodType {
     VcselPeriodPreRange = 0,
     VcselPeriodFinalRange = 1,
+}
+
+/// Which event is routed to the GPIO pin.
+#[derive(Copy, Clone, Debug)]
+pub enum GpioFunctionality {
+    /// Interrupt on new sample ready (default after init)
+    NewSampleReady,
+    /// Interrupt on range below low threshold
+    LevelLow,
+    /// Interrupt on range above high threshold
+    LevelHigh,
+    /// Interrupt on range outside window (below low OR above high)
+    OutOfWindow,
+}
+
+/// Active level of the interrupt pin.
+#[derive(Copy, Clone, Debug)]
+pub enum GpioPolarity {
+    /// GPIO pulls low when interrupt occurs (default after init)
+    ActiveLow,
+    /// GPIO pulls high when interrupt occurs
+    ActiveHigh,
 }
