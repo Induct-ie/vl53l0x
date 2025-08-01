@@ -33,6 +33,8 @@ pub enum Error<E> {
     /// It is a 7 bit address thus the range is 0x00 - 0x7F but
     /// 0x00 - 0x07 and 0x78 - 0x7F are reserved I2C addresses and cannot be used.
     InvalidAddress(u8),
+    /// Invalid argument (e.g., threshold values out of range or low > high).
+    InvalidArgument,
 }
 
 impl<E> core::convert::From<E> for Error<E> {
@@ -813,6 +815,62 @@ where
         Ok(true)
     }
 
+    /// Program the distance-window interrupt.
+    /// `low_mm` ≤ `high_mm`, values in millimetres (0–8190 mm).
+    ///
+    /// # Example
+    /// ```
+    /// # use vl53l0x::{VL53L0x, Error};
+    /// # fn test() -> Result<(), Error<()>> {
+    /// # let i2c = unimplemented!(); // dummy_i2c();
+    /// # let mut tof = VL53L0x::new(i2c)?;
+    /// tof.set_interrupt_thresholds_mm(100, 300)?; // 10cm to 30cm
+    /// let (lo, hi) = tof.get_interrupt_thresholds_mm()?;
+    /// assert_eq!((lo, hi), (100, 300));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_interrupt_thresholds_mm(
+        &mut self,
+        low_mm: u16,
+        high_mm: u16,
+    ) -> Result<(), Error<E>> {
+        // Validate arguments
+        if low_mm > high_mm {
+            return Err(Error::InvalidArgument);
+        }
+        // 12-bit register limit: max value is 0x0FFF * 2 = 8190 mm
+        if low_mm > 8190 || high_mm > 8190 {
+            return Err(Error::InvalidArgument);
+        }
+
+        // Encode: divide by 2 because firmware multiplies by 2 during comparison
+        let low_raw = (low_mm / 2) & 0x0FFF;
+        let high_raw = (high_mm / 2) & 0x0FFF;
+
+        // Write to registers
+        self.write_16bit(Register::SYSTEM_THRESH_LOW, low_raw)?;
+        self.write_16bit(Register::SYSTEM_THRESH_HIGH, high_raw)?;
+
+        Ok(())
+    }
+
+    /// Retrieve the currently stored thresholds (millimetres).
+    /// Returns (low_mm, high_mm).
+    pub fn get_interrupt_thresholds_mm(
+        &mut self,
+    ) -> Result<(u16, u16), Error<E>> {
+        // Read raw values from registers
+        let low_raw = self.read_16bit(Register::SYSTEM_THRESH_LOW)?;
+        let high_raw = self.read_16bit(Register::SYSTEM_THRESH_HIGH)?;
+
+        // Decode: multiply by 2 to get actual mm values
+        let low_mm = (low_raw & 0x0FFF) * 2;
+        let high_mm = (high_raw & 0x0FFF) * 2;
+
+        Ok((low_mm, high_mm))
+    }
+
     /*
         fn write_byte_raw(&mut self, reg: u8, byte: u8) {
             // FIXME:
@@ -950,6 +1008,8 @@ enum Register {
     CROSSTALK_COMPENSATION_PEAK_RATE_MCPS = 0x20,
     MSRC_CONFIG_TIMEOUT_MACROP = 0x46,
     I2C_SLAVE_DEVICE_ADDRESS = 0x8A,
+    SYSTEM_THRESH_HIGH = 0x0C,
+    SYSTEM_THRESH_LOW = 0x0E,
 }
 
 #[derive(Debug, Copy, Clone)]
