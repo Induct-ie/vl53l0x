@@ -193,7 +193,7 @@ where
         let v4 = ((word >> 24) & 0xFF) as u8;
         self.com.write_read(
             self.address,
-            &[reg as u8, v1, v2, v3, v4],
+            &[reg as u8, v4, v3, v2, v1],
             &mut buffer,
         )
     }
