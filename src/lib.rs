@@ -91,7 +91,7 @@ where
     /// Only allows values between 0x08 and 0x77 as the device uses a 7 bit address and
     /// 0x00 - 0x07 and 0x78 - 0x7F are reserved
     pub fn set_address(&mut self, new_address: u8) -> Result<(), Error<E>> {
-        if new_address < 0x08 || new_address > 0x77 {
+        if !(0x08..=0x77).contains(&new_address) {
             return Err(Error::InvalidAddress(new_address));
         }
         self.com.write(
@@ -201,7 +201,7 @@ where
     }
 
     fn set_signal_rate_limit(&mut self, limit: f32) -> Result<bool, E> {
-        if limit < 0.0 || limit > 511.99 {
+        if !(0.0..=511.99).contains(&limit) {
             Ok(false)
         } else {
             // Q9.7 fixed point format (9 integer bits, 7 fractional bits)
@@ -466,7 +466,7 @@ where
                 // This bit is lower than the first one that should be enabled, or (reference_spad_count) bits have already been enabled, so zero this bit
                 ref_spad_map[i / 8] &= !(1 << (i % 8));
             } else if (ref_spad_map[i / 8] >> (i % 8)) & 0x1 > 0 {
-                spads_enabled = spads_enabled + 1;
+                spads_enabled += 1;
             }
         }
 
@@ -679,7 +679,7 @@ where
                 msrc_dss_tcc_mclks as u16,
                 pre_range_vcselperiod_pclks,
             ),
-            pre_range_mclks: pre_range_mclks,
+            pre_range_mclks,
             pre_range_microseconds: timeout_mclks_to_microseconds(
                 pre_range_mclks,
                 pre_range_vcselperiod_pclks,
@@ -755,7 +755,7 @@ where
         let timeouts = self.get_sequence_step_timeouts(&enables)?;
 
         let mut use_budget_microseconds: u32 =
-            (start_overhead + end_overhead) as u32;
+            start_overhead + end_overhead;
         if enables.tcc {
             use_budget_microseconds +=
                 timeouts.msrc_dss_tcc_microseconds + tcc_overhead;
@@ -921,8 +921,7 @@ struct SeqStepTimeouts {
 
 fn decode_timeout(register_value: u16) -> u16 {
     // format: "(LSByte * 2^MSByte) + 1"
-    ((register_value & 0x00FF) << (((register_value & 0xFF00) as u16) >> 8))
-        as u16
+    ((register_value & 0x00FF) << ((register_value & 0xFF00) >> 8))
         + 1
 }
 
@@ -940,7 +939,7 @@ fn encode_timeout(timeout_mclks: u16) -> u16 {
         ms_byte += 1;
     }
 
-    return (ms_byte << 8) | ((ls_byte & 0xFF) as u16);
+    (ms_byte << 8) | ((ls_byte & 0xFF) as u16)
 }
 
 fn calc_macro_period(vcsel_period_pclks: u8) -> u32 {
@@ -952,7 +951,7 @@ fn timeout_mclks_to_microseconds(
     vcsel_period_pclks: u8,
 ) -> u32 {
     let macro_period_nanoseconds: u32 =
-        calc_macro_period(vcsel_period_pclks) as u32;
+        calc_macro_period(vcsel_period_pclks);
     (((timeout_period_mclks as u32) * macro_period_nanoseconds)
         + (macro_period_nanoseconds / 2))
         / 1000
@@ -963,7 +962,7 @@ fn timeout_microseconds_to_mclks(
     vcsel_period_pclks: u8,
 ) -> u32 {
     let macro_period_nanoseconds: u32 =
-        calc_macro_period(vcsel_period_pclks) as u32;
+        calc_macro_period(vcsel_period_pclks);
 
     ((timeout_period_microseconds * 1000) + (macro_period_nanoseconds / 2))
         / macro_period_nanoseconds
